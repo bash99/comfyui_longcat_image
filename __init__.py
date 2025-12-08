@@ -42,6 +42,12 @@ class LongCatImageModelLoader(io.ComfyNode):
                     default="bfloat16",
                     tooltip="Data type for model weights"
                 ),
+                io.Combo.Input(
+                    "enable_cpu_offload",
+                    options=["false", "true"],
+                    default="true",
+                    tooltip="Enable CPU offload to save VRAM (~17-19GB required). Slower but prevents OOM on low VRAM GPUs."
+                ),
             ],
             outputs=[
                 LongCatPipe.Output(
@@ -52,7 +58,7 @@ class LongCatImageModelLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model_path, dtype) -> io.NodeOutput:
+    def execute(cls, model_path, dtype, enable_cpu_offload) -> io.NodeOutput:
         try:
             from transformers import AutoProcessor
             from longcat_image.models import LongCatImageTransformer2DModel
@@ -108,16 +114,23 @@ class LongCatImageModelLoader(io.ComfyNode):
             subfolder='tokenizer'
         )
 
+        # Determine if this is an edit model by checking the path
+        is_edit_model = "edit" in model_path.lower()
+        
+        # Determine CPU offload setting
+        cpu_offload = enable_cpu_offload == "true"
+
         # Load transformer
         transformer = LongCatImageTransformer2DModel.from_pretrained(
             checkpoint_dir,
             subfolder='transformer',
             torch_dtype=torch_dtype,
             use_safetensors=True
-        ).to(device)
-
-        # Determine if this is an edit model by checking the path
-        is_edit_model = "edit" in model_path.lower()
+        )
+        
+        # Only move transformer to device if CPU offload is disabled
+        if not cpu_offload:
+            transformer = transformer.to(device)
 
         # Load appropriate pipeline
         if is_edit_model:
@@ -125,15 +138,24 @@ class LongCatImageModelLoader(io.ComfyNode):
                 checkpoint_dir,
                 transformer=transformer,
                 text_processor=text_processor,
+                torch_dtype=torch_dtype,
             )
         else:
             pipe = LongCatImagePipeline.from_pretrained(
                 checkpoint_dir,
                 transformer=transformer,
                 text_processor=text_processor,
+                torch_dtype=torch_dtype,
             )
         
-        pipe.to(device, torch_dtype)
+        # Apply CPU offload or move to device based on user preference
+        if cpu_offload:
+            # Enable CPU offload to save VRAM (Requires ~17-19 GB); slower but prevents OOM
+            pipe.enable_model_cpu_offload()
+
+        else:
+            # Load all models to GPU at once (Faster inference but requires more VRAM)
+            pipe.to(device, torch_dtype)
 
         pipeline_data = {
             "pipe": pipe,
